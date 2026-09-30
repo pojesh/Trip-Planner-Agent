@@ -43,10 +43,15 @@ def bbox_around(lat: float, lon: float, radius_m: float) -> list[float]:
     return [lat - dlat, lat + dlat, lon - dlon, lon + dlon]
 
 
-def radius_for_bbox(bbox: list[float], min_m: int = 3000, max_m: int = 8000) -> int:
-    """Search radius from a Nominatim bbox [south, north, west, east]."""
+MIN_RADIUS_M = 5_000
+MAX_RADIUS_M = 15_000
+DAY_TRIP_RADIUS_M = 100_000  # how far away a named day-trip town / must-see may be
+
+
+def radius_for_bbox(bbox: list[float], min_m: int = MIN_RADIUS_M, max_m: int = MAX_RADIUS_M) -> int:
+    """Search radius from a Nominatim bbox [south, north, west, east]: 0.8 × half its diagonal."""
     if len(bbox) != 4:
-        return 5000
+        return 8_000
     south, north, west, east = bbox
     half_diag = haversine_m(south, west, north, east) / 2
-    return int(max(min_m, min(max_m, half_diag * 0.6)))
+    return int(max(min_m, min(max_m, half_diag * 0.8)))
