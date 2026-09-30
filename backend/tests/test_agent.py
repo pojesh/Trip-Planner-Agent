@@ -100,6 +100,23 @@ def test_find_places_includes_must_see_and_reports_missing():
     assert result.kind == "plan"
 
 
+def test_find_places_near_a_day_trip_town():
+    overpass = FakeOverpass()
+    llm = ScriptedLLM([
+        call("find_places", {"interests": ["culture"], "near_place": "Sintra"}),
+        call("find_places", {"interests": ["culture"], "near_place": "Atlantis"}, cid="c2"),
+        AIMessage(content="done"),
+    ])
+    c = ctx()
+    run(TripAgent(llm, overpass, FakeNominatim(), FakeRouter()), c)
+    first = llm.seen[1][-1].content
+    assert '"searched_around": "Sintra"' in first
+    second = llm.seen[2][-1].content
+    assert '"not_found": ["Atlantis"]' in second
+    # searched once, centred on the town (not the city); the unknown town triggered no search
+    assert overpass.calls == 1 and overpass.last_search[:2] == (38.7980, -9.3880)
+
+
 def test_wrong_day_count_rejected():
     llm = ScriptedLLM([
         call("find_places", {"interests": ["culture"]}),

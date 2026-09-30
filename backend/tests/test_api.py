@@ -115,6 +115,14 @@ def test_generate_with_agent_question_then_plan(make_client):
     assert [m["role"] for m in trip["chat"]] == ["assistant", "user", "assistant"]
 
 
+def test_question_before_any_search_reaches_the_user(make_client):
+    llm = ScriptedLLM([call("ask_user", {"question": "Museums or outdoors first?", "quick_replies": ["Museums", "Outdoors"]})])
+    client, _ = make_client(llm)
+    evs = generate(client)
+    assert evs[-1] == {"type": "question", "question": "Museums or outdoors first?",
+                       "quick_replies": ["Museums", "Outdoors"]}
+
+
 def test_agent_failure_falls_back(make_client):
     class Broken(ScriptedLLM):
         def invoke(self, messages):

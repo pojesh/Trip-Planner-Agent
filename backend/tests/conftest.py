@@ -31,7 +31,14 @@ DEST = PlaceResult(label="Lisbon, Portugal", name="Lisbon", lat=38.7223, lon=-9.
 
 
 class FakeNominatim:
+    TOWN = PlaceResult(label="Sintra, Portugal", name="Sintra", lat=38.7980, lon=-9.3880, type="town",
+                       boundingbox=[38.78, 38.81, -9.41, -9.37])
+
     def search_place(self, query, limit=5, near_bbox=None, only_nearby=False):
+        if query.lower() == "sintra":
+            return [self.TOWN]
+        if query.lower() == "atlantis":
+            return []
         return [DEST]
 
     def find_must_see(self, names, bbox):
@@ -46,6 +53,7 @@ class FakeOverpass:
 
     def find_pois(self, lat, lon, radius_m, interests):
         self.calls += 1
+        self.last_search = (lat, lon, radius_m)
         return [p for p in self.pois if p.interest in interests]
 
 
