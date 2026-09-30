@@ -27,13 +27,13 @@ When a route can't be found, the app says so. It never makes up a travel time.
 |---|---|
 | Language | Python |
 | Frontend | Streamlit |
-| Map rendering | pydeck (deck.gl) + Carto Positron basemap |
+| Map rendering | pydeck |
 | Backend API | FastAPI + Uvicorn |
-| Agent orchestration | LangChain Core (tool calling) |
-| LLM | Google Gemini via `langchain-google-genai` |
+| Agent orchestration | LangChain |
+| LLM | Google Gemini |
 | Geocoding | Nominatim (OpenStreetMap) |
-| Places | Overpass API (OpenStreetMap) + mirror |
-| Routing | OSRM (FOSSGIS server, foot + car profiles) |
+| Places | Overpass API (OpenStreetMap) |
+| Routing | OSRM (FOSSGIS server) |
 | Storage | SQLite |
 | Testing | pytest + Streamlit AppTest |
 
