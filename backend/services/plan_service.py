@@ -68,7 +68,9 @@ class PlanService:
                 result = None
             if result and result.kind == "plan":
                 plan = result.plan
-            elif result and ctx.candidates:  # a question (or a text reply) for the traveller
+            elif result and (result.kind == "question" or ctx.candidates):
+                # ask_user (or a plain-text reply once places were found) goes back to the traveller.
+                # A text reply with no places found means the search failed: use the built-in planner.
                 yield {"type": "question", "question": result.message, "quick_replies": result.quick_replies}
                 return
 
@@ -157,7 +159,7 @@ class PlanService:
             self._apply_plan(trip, result.plan, keep_notes=notes)
             trip.constraints.planner = "gemini"
         trip.chat.append(ChatMessage(role="assistant", content=result.message or "Done — plan updated.",
-                                     quick_replies=result.quick_replies))
+                                     quick_replies=result.quick_replies, changed_plan=changed))
         trip.updated_at = utc_now()
         self.repo.save_trip(trip)
         yield {"type": "result", "trip": trip.model_dump(mode="json"), "changed": changed}

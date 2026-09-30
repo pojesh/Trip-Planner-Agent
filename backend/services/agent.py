@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 from backend.clients.nominatim import NominatimClient
 from backend.clients.overpass import OverpassClient
 from backend.clients.routing import RoutingClient
-from backend.domain.geo import bbox_around, haversine_m
+from backend.domain.geo import DAY_TRIP_RADIUS_M, bbox_around, haversine_m, radius_for_bbox
 from backend.domain.models import (
     AgentStop, Day, Interest, ItineraryPlan, Location, Poi, TransportMode, fmt_hhmm, parse_hhmm,
 )
@@ -44,6 +44,9 @@ SYSTEM_PROMPT = """You are a travel-planning coordinator inside a trip planner a
 How to work:
 1. Call find_places to get real candidate places (from OpenStreetMap) for the traveller's interests
    and must-see places. You may call it again later for other kinds of places.
+   Read the traveller's notes and messages carefully: if they name a specific place, look it up with
+   must_see; if they want a day trip to a nearby town (e.g. "a day in Mahabalipuram"), call find_places
+   with near_place set to that town and plan that whole day there (check_route shows the travel time).
 2. Choose places ONLY from candidates returned by find_places, referring to them by their exact "id".
 3. Keep each day in a compact area and use the traveller's whole daily window.
    For walking trips, choose places close to each other (ideally under ~2 km apart) and to the start
@@ -63,6 +66,8 @@ Rules:
 - Only call ask_user when the answer would materially change the plan and you cannot make a
   sensible assumption. Otherwise assume, and mention the assumption in submit_itinerary.
 - When the traveller only asks a question about the plan, answer in plain text without tools.
+- The plan only changes when you call submit_itinerary. Never say you updated, added or changed
+  anything unless you called submit_itinerary; if you cannot do what was asked, say so plainly and why.
 - Be brief and friendly. No markdown."""
 
 
@@ -70,7 +75,11 @@ Rules:
 
 class FindPlacesArgs(BaseModel):
     interests: list[str] = Field(description="Kinds of places: " + ", ".join(i.value for i in Interest))
-    must_see: list[str] = Field(default_factory=list, description="Specific place names to look up (optional)")
+    must_see: list[str] = Field(default_factory=list,
+                                description="Specific place names to look up, up to ~100 km away (optional)")
+    near_place: Optional[str] = Field(
+        default=None, description="Optional town/area to search around instead of the city centre, "
+                                  "for a day trip (e.g. 'Mahabalipuram'). Must be within ~100 km.")
 
 
 class CheckRouteArgs(BaseModel):
@@ -156,17 +165,29 @@ def _text(ai: AIMessage) -> str:
 
 
 def discover(overpass: OverpassClient, nominatim: NominatimClient, ctx: AgentContext,
-             interests: list[str], must_see: list[str]) -> list[Poi]:
-    """Find real places for interests (Overpass) and named must-sees (Nominatim, inside the area).
+             interests: list[str], must_see: list[str], near_place: Optional[str] = None) -> list[Poi]:
+    """Find real places for interests (Overpass) and named must-sees (Nominatim).
 
-    Adds them to the run's candidate pool and returns the newly found places.
+    Normally searches the city circle. With `near_place` (e.g. a day-trip town) it searches
+    around that town instead, if the town is within DAY_TRIP_RADIUS_M of the destination.
+    Must-see names are looked up within the same day-trip range.
+    Adds everything found to the run's candidate pool and returns the newly found places.
     """
+    region = bbox_around(ctx.destination.lat, ctx.destination.lon, DAY_TRIP_RADIUS_M)
+    lat, lon, radius = ctx.destination.lat, ctx.destination.lon, ctx.radius_m
+    if near_place:
+        towns = nominatim.search_place(near_place, limit=1, near_bbox=region, only_nearby=True)
+        if not towns:
+            ctx.must_see_missing = list(dict.fromkeys(ctx.must_see_missing + [near_place]))
+            return []
+        lat, lon = towns[0].lat, towns[0].lon
+        radius = radius_for_bbox(towns[0].boundingbox, 3_000, 6_000)
+
     valid = [i for i in interests if i in {x.value for x in Interest}]
-    pois = overpass.find_pois(ctx.destination.lat, ctx.destination.lon, ctx.radius_m, valid) if valid else []
+    pois = overpass.find_pois(lat, lon, radius, valid) if valid else []
     must: list[Poi] = []
     if must_see:
-        area = bbox_around(ctx.destination.lat, ctx.destination.lon, ctx.radius_m * 1.5)
-        must, missing = nominatim.find_must_see(must_see, area)
+        must, missing = nominatim.find_must_see(must_see, region)
         ctx.must_see_missing = list(dict.fromkeys(ctx.must_see_missing + missing))
     found = list({p.id: p for p in pois + must}.values())  # must-see wins on duplicates
     for p in found:
@@ -185,10 +206,14 @@ class TripAgent:
     # -------------------------------------------------------------- tools
 
     def _tools(self, ctx: AgentContext, allow_questions: bool) -> list[StructuredTool]:
-        def find_places(interests: list[str], must_see: Optional[list[str]] = None) -> str:
-            found = discover(self.overpass, self.nominatim, ctx, interests, must_see or [])
+        def find_places(interests: list[str], must_see: Optional[list[str]] = None,
+                        near_place: Optional[str] = None) -> str:
+            found = discover(self.overpass, self.nominatim, ctx, interests, must_see or [], near_place)
             result = {"candidates": candidate_rows(found, ctx.origin)}
-            missing = [m for m in (must_see or []) if m in ctx.must_see_missing]
+            if near_place:
+                result["searched_around"] = near_place
+            missing = [m for m in (must_see or []) + ([near_place] if near_place else [])
+                       if m in ctx.must_see_missing]
             if missing:
                 result["not_found"] = missing
             return json.dumps(result, ensure_ascii=False)
@@ -304,4 +329,4 @@ def build_llm(api_key: str, model: str, timeout_s: float):
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     return ChatGoogleGenerativeAI(model=model, google_api_key=api_key, temperature=0.3,
-                                  timeout=timeout_s, max_retries=3)  # rides out brief 503 "high demand" spikes
+                                  timeout=timeout_s, max_retries=5)  

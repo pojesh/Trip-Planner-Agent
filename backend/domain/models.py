@@ -289,6 +289,7 @@ class ChatMessage(BaseModel):
     role: str  # "user" | "assistant"
     content: str
     quick_replies: list[str] = Field(default_factory=list)
+    changed_plan: bool = False  # True only when this reply actually changed the itinerary
     at: str = Field(default_factory=utc_now)
 
 
