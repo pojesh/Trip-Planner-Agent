@@ -59,6 +59,8 @@ def render_chat(trip: dict, agent_on: bool) -> None:
             avatar = "🧭" if m["role"] == "assistant" else "🙂"
             with st.chat_message(m["role"], avatar=avatar):
                 st.markdown(_md(m["content"]))
+                if m.get("changed_plan"):
+                    st.badge("Plan updated", icon=":material/check_circle:", color="green")
 
     last = trip["chat"][-1] if trip["chat"] else None
     replies = last.get("quick_replies") if last and last["role"] == "assistant" else []

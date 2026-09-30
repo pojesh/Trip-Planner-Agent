@@ -29,13 +29,13 @@ def _state():
 
 
 def _radius_m(bbox: list) -> float:
-    """Same rule as the backend: 0.6 × half the bbox diagonal, clamped to 3–8 km."""
+    """Same rule as the backend: 0.8 × half the bbox diagonal, clamped to 5–15 km."""
     if len(bbox or []) != 4:
-        return 5000
+        return 8000
     s, n, w, e = bbox
     dy = (n - s) * 111_000
     dx = (e - w) * 111_000 * math.cos(math.radians((n + s) / 2))
-    return max(3000, min(8000, math.hypot(dx, dy) / 2 * 0.6))
+    return max(5000, min(15000, math.hypot(dx, dy) / 2 * 0.8))
 
 
 def _result_label(r: dict) -> str:
