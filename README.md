@@ -53,8 +53,6 @@ python run.py
 
 Use a virtual environment. This project needs `langchain-core>=0.3`, which could conflict with an older global LangChain install.
 
-**No Gemini key?** The app still works. Trips are made by a deterministic built-in planner from the same real places, and the chat assistant is turned off.
-
 Run the tests with `pytest backend/tests -q`. They use no network and no real database.
 
 ## How the agent works (LangChain)
