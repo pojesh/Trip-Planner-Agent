@@ -163,8 +163,6 @@ flowchart LR
     VDB -- "relevant passages" --> AG
     AG -- "trips / bookings" --> DB[("SQLite")]
     DB --> AG
-    AG -- "refund quote" --> RULES["Cancellation rules<br/>in code"]
-    RULES --> AG
 
     AG --> CHK{"Grounding check"}
     CHK -- "verified" --> ANS(["Answer with citations"])
