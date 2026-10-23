@@ -14,7 +14,7 @@ from backend.clients.overpass import OverpassClient
 from backend.clients.routing import RoutingClient
 from backend.domain.geo import radius_for_bbox
 from backend.domain.models import (
-    PACE_STOPS, AddStopRequest, ChatMessage, Day, GeocodeRequest, ItineraryPlan, Location,
+    PACE_STOPS, AddStopRequest, BookingStatus, ChatMessage, Day, GeocodeRequest, ItineraryPlan, Location,
     PlaceResult, Poi, StopUpdate, Trip, TripConstraints, TripRequest, TripStatus, TripSummary, utc_now,
 )
 from backend.errors import AppError, not_found
@@ -33,6 +33,19 @@ def stage(key: str, label: str) -> dict:
     return {"type": "stage", "stage": key, "label": label}
 
 
+def itinerary_lines(trip: Trip) -> list[str]:
+    """The day-by-day plan as compact text lines for an LLM prompt."""
+    lines = []
+    for d in trip.days:
+        lines.append(f"Day {d.day_number} ({d.trip_date}):")
+        for s in d.stops:
+            note = f" — note: {s.user_note}" if s.user_note else ""
+            fixed = f" (earliest_start {s.earliest_start})" if s.earliest_start else ""
+            lines.append(f"  {s.sequence}. [{s.candidate_id}] {s.name} ({s.category}) "
+                         f"{s.planned_arrival}-{s.planned_departure}, {s.visit_minutes} min{fixed}{note}")
+    return lines
+
+
 class PlanService:
     def __init__(self, repo: SqliteRepo, nominatim: NominatimClient, overpass: OverpassClient,
                  router: RoutingClient, agent: Optional[TripAgent]):
@@ -40,7 +53,7 @@ class PlanService:
         self.nominatim = nominatim
         self.overpass = overpass
         self.router = router
-        self.agent = agent  # None when GEMINI_API_KEY is not set
+        self.agent = agent  # None when no LLM API key is set
 
     def geocode(self, req: GeocodeRequest) -> list[PlaceResult]:
         return self.nominatim.search_place(req.query, req.limit, req.near_bbox)
@@ -139,7 +152,8 @@ class PlanService:
     def chat(self, trip_id: str, message: str) -> Iterator[dict]:
         trip = self._load(trip_id)
         if self.agent is None:
-            raise AppError("agent_disabled", "The AI assistant needs GEMINI_API_KEY in .env. "
+            raise AppError("agent_disabled", "The AI assistant needs an LLM API key in .env "
+                           "(GEMINI_API_KEY or GROQ_API_KEY, chosen by LLM_PROVIDER). "
                            "You can still edit the plan by hand.", http_status=503)
         trip.chat.append(ChatMessage(role="user", content=message))
         ctx = AgentContext(
@@ -173,13 +187,7 @@ class PlanService:
         if trip.constraints.notes:
             lines.append(f"Traveller notes: {trip.constraints.notes}")
         lines.append("\nCURRENT PLAN (times from the routing service):")
-        for d in trip.days:
-            lines.append(f"Day {d.day_number} ({d.trip_date}):")
-            for s in d.stops:
-                note = f" — note: {s.user_note}" if s.user_note else ""
-                fixed = f" (earliest_start {s.earliest_start})" if s.earliest_start else ""
-                lines.append(f"  {s.sequence}. [{s.candidate_id}] {s.name} ({s.category}) "
-                             f"{s.planned_arrival}-{s.planned_departure}, {s.visit_minutes} min{fixed}{note}")
+        lines += itinerary_lines(trip)
         lines.append("\nKNOWN CANDIDATES (you can also call find_places for more):")
         lines.append(json.dumps(candidate_rows(trip.candidates, trip.origin), ensure_ascii=False))
         lines.append("\nCONVERSATION (latest last):")
@@ -259,6 +267,10 @@ class PlanService:
         return self.repo.list_trips()
 
     def delete_trip(self, trip_id: str) -> None:
+        booking = self.repo.get_booking(trip_id)
+        if booking and booking.status == BookingStatus.booked:
+            raise AppError("trip_booked", f"This trip is booked ({booking.booking_ref}). Cancel the booking "
+                           "with the support assistant before deleting the trip.", http_status=409)
         if not self.repo.delete_trip(trip_id):
             raise not_found("Trip")
 

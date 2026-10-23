@@ -81,6 +81,22 @@ class Severity(str, Enum):
     error = "error"
 
 
+class BookingStatus(str, Enum):
+    booked = "booked"
+    cancelled = "cancelled"
+
+
+class TripType(str, Enum):
+    domestic = "domestic"
+    international = "international"
+
+
+class FareType(str, Enum):
+    standard = "standard"
+    flexi = "flexi"
+    promo = "promo"
+
+
 # ---------------------------------------------------------------- places
 
 class PlaceResult(BaseModel):
@@ -209,6 +225,15 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
 
 
+class BookRequest(BaseModel):
+    fare_type: FareType = FareType.standard
+
+
+class SupportChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    trip_id: Optional[str] = None  # the trip the user is looking at, if any
+
+
 # ---------------------------------------------------------------- itinerary
 
 class Issue(BaseModel):
@@ -279,7 +304,7 @@ class TripConstraints(BaseModel):
     return_to_start: bool = True
     search_radius_m: int = 5000
     destination_bbox: list[float] = Field(default_factory=list)
-    planner: str = "gemini"  # "gemini" or "built-in"
+    planner: str = "gemini"  # "gemini" = the AI agent (any LLM provider), or "built-in"
     assumptions: list[str] = Field(default_factory=list)
     must_see_missing: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)  # computed trip-wide warnings
@@ -291,6 +316,24 @@ class ChatMessage(BaseModel):
     quick_replies: list[str] = Field(default_factory=list)
     changed_plan: bool = False  # True only when this reply actually changed the itinerary
     at: str = Field(default_factory=utc_now)
+
+
+class Booking(BaseModel):
+    """Booking status for a planned trip (no prices in this version)."""
+    trip_id: str
+    booking_ref: str  # "WH-2026-000123"
+    status: BookingStatus
+    trip_type: TripType
+    fare_type: FareType
+    policy_version: str
+    booked_at: str
+    cancelled_at: Optional[str] = None
+    cancellation_ref: Optional[str] = None  # "CXL-2026-000123"
+    cancellation_reason: Optional[str] = None
+    charge_percent: Optional[int] = None
+    refund_percent: Optional[int] = None
+    refund_status: Optional[str] = None  # "initiated"
+    refund_expected_by: Optional[date] = None
 
 
 class Trip(BaseModel):
@@ -312,6 +355,7 @@ class Trip(BaseModel):
     days: list[Day] = Field(default_factory=list)
     candidates: list[Poi] = Field(default_factory=list)
     chat: list[ChatMessage] = Field(default_factory=list)
+    booking: Optional[Booking] = None  # read from the bookings table; never written with the trip
     created_at: str
     updated_at: str
 
@@ -324,6 +368,8 @@ class TripSummary(BaseModel):
     start_date: date
     end_date: date
     updated_at: str
+    booking_ref: Optional[str] = None
+    booking_status: Optional[BookingStatus] = None
 
 
 # ---------------------------------------------------------------- agent plan (submit_itinerary args)
@@ -331,7 +377,8 @@ class TripSummary(BaseModel):
 class AgentStop(BaseModel):
     candidate_id: str = Field(description="Exact id from find_places, e.g. 'node/123'")
     visit_minutes: int = Field(description="Time to spend there, 10-240")
-    reason: str = Field(default="", description="Short reason this stop fits the traveller")
+    # Optional fields here accept null: Groq validates tool calls against this schema and rejects null otherwise.
+    reason: Optional[str] = Field(default="", description="Short reason this stop fits the traveller")
     earliest_start: Optional[str] = Field(
         default=None, description="Optional 'HH:MM': don't start before this time, e.g. '19:00' for dinner "
                                   "or '17:30' for a sunset spot. Leave empty to go straight on.")
@@ -352,10 +399,15 @@ class AgentStop(BaseModel):
 class AgentDay(BaseModel):
     day_number: int = Field(description="1-based day number")
     stops: list[AgentStop] = Field(description="Stops in visiting order")
-    summary: str = Field(default="", description="One-line summary of the day")
+    summary: Optional[str] = Field(default="", description="One-line summary of the day")
 
 
 class ItineraryPlan(BaseModel):
     days: list[AgentDay] = Field(description="Every day of the trip")
     summary: str = Field(description="Short friendly message to the traveller about the plan")
-    assumptions: list[str] = Field(default_factory=list, description="Assumptions you made")
+    assumptions: Optional[list[str]] = Field(default_factory=list, description="Assumptions you made")
+
+    @field_validator("assumptions", mode="before")
+    @classmethod
+    def _no_null_assumptions(cls, v):
+        return v or []  # the schema allows null; the code always gets a list

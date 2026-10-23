@@ -4,7 +4,8 @@ Wayfinder turns a traveller's preferences into an **editable, map-based, day-by-
 
 - **Places** come from OpenStreetMap, via Overpass.
 - **Routes and travel times** come from OSRM.
-- **The agent** is Google Gemini, orchestrated with **LangChain**. It chooses and orders places but never invents them.
+- **The agent** is an LLM (Groq `gpt-oss-120b` or Google Gemini, set by `LLM_PROVIDER`), orchestrated with **LangChain**. It chooses and orders places but never invents them.
+- **The support assistant** (Help & bookings page) answers from the agency's policy PDFs via RAG (local ChromaDB + local embeddings) and from your own trips and bookings, and can cancel a booking after you confirm.
 
 When a route can't be found, the app says so. It never makes up a travel time.
 
@@ -30,7 +31,8 @@ When a route can't be found, the app says so. It never makes up a travel time.
 | Map rendering | pydeck |
 | Backend API | FastAPI + Uvicorn |
 | Agent orchestration | LangChain |
-| LLM | Google Gemini |
+| LLM | Groq (`openai/gpt-oss-120b`) or Google Gemini, chosen by `LLM_PROVIDER` |
+| RAG | ChromaDB + `BAAI/bge-small-en-v1.5` (sentence-transformers, local) + PyMuPDF |
 | Geocoding | Nominatim (OpenStreetMap) |
 | Places | Overpass API (OpenStreetMap) |
 | Routing | OSRM (FOSSGIS server) |
@@ -44,7 +46,8 @@ python -m venv venv
 venv\Scripts\activate           # macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
 copy .env.example .env          # macOS/Linux: cp .env.example .env
-# edit .env: set GEMINI_API_KEY and put your email in HTTP_USER_AGENT
+# edit .env: set LLM_PROVIDER + GROQ_API_KEY (or GEMINI_API_KEY) and put your email in HTTP_USER_AGENT
+python -m backend.support.ingest   # optional: index rag/data/*.pdf now (else done on startup)
 python run.py
 ```
 
@@ -143,6 +146,61 @@ Streamlit ──POST /api/trips/{id}/chat──▶ FastAPI (streamed)
 | `POST /api/trips/{id}/save` | Mark a draft as saved, with a title |
 | `DELETE /api/trips/{id}` | Delete a trip and all its days, stops and routes |
 
+## Support assistant & bookings (RAG)
+
+Wayfinder is presented as the app of **Wayfinder Holidays Pvt. Ltd.**, a fictional tour operator selling domestic
+(India) and international trips. A planned trip can be booked with **Book this trip** (fare type Standard, Flexi or
+Promo; no prices in this version). The **Help & bookings** page has a separate support assistant and a **Dev board**.
+
+```mermaid
+flowchart LR
+    PDF["Policy PDFs<br/>rag/data"] --> ING["Parse + chunk<br/>PyMuPDF"]
+    ING --> EMB["Local embeddings<br/>bge-small-en-v1.5"]
+    EMB --> VDB[("ChromaDB")]
+
+    Q(["User question"]) --> AG{"Support agent<br/>LLM + tools"}
+    AG -- "policy question" --> VDB
+    VDB -- "relevant passages" --> AG
+    AG -- "trips / bookings" --> DB[("SQLite")]
+    DB --> AG
+    AG -- "refund quote" --> RULES["Cancellation rules<br/>in code"]
+    RULES --> AG
+
+    AG --> CHK{"Grounding check"}
+    CHK -- "verified" --> ANS(["Answer with citations"])
+    CHK -- "not verified" --> FB(["Safe fallback"])
+```
+
+**Knowledge sources** (the assistant may use nothing else):
+
+| Source | What | How |
+|---|---|---|
+| Policy PDFs | `rag/data/WH-POL-*.pdf` | PyMuPDF → chunks → local embeddings → ChromaDB in `rag/chroma` (rebuilt when the PDFs change) |
+| Trips & bookings | SQLite | read-only tools `list_trips`, `get_trip`, `list_bookings`, `get_booking` |
+| Cancellation rules | `backend/support/policy_rules.py` | `quote_cancellation`: tier, charge %, refund %, non-refundables, refund date are **computed in code**, never by the LLM |
+| System facts | limits from `backend/domain/models.py` and config | in the system prompt; they override documents |
+
+**Not hallucinating (checked in code, `backend/support/agent.py`):**
+- Policy search results below `RAG_SCORE_THRESHOLD` come back as `NO_RELEVANT_POLICY`, and the assistant must say it doesn't know.
+- Every citation `[WH-POL-003 p.2]` must come from a search in that turn; every percentage, ISO date and booking/cancellation reference must appear in a tool result. A failing answer is sent back once to be fixed, then replaced by a safe "I couldn't verify that" message.
+- Document text, trip notes and DB values are treated as data, not instructions.
+
+**Cancelling:** the assistant quotes the policy-based charge (days before departure in IST, 18:00 cutoff), explains it with citations, and shows a **Confirm cancellation** card. Only the button calls `POST /api/support/confirm/{quote_id}`, which re-checks the quote (15-minute expiry), sets the booking to `cancelled`, issues a `CXL-…` reference and marks the refund `initiated`, in one transaction. Confirming twice changes nothing. Visa refusal, force majeure and exceptions are referred to Customer Care. A booked trip can't be deleted until it's cancelled.
+
+**Dev board:** for each turn, total latency, LLM calls with latency and input/output tokens (shown as "n/a" when the provider reports none), every policy search with embedding and vector-search time, chunk scores, document, version and page, tool arguments and results, grounding-check results and DB writes. The **Knowledge base** view shows the indexed PDFs and chunk count and can rebuild the index.
+
+**No LLM key:** the support page still works and shows the best-matching policy sections instead of an AI answer.
+
+| Call | Purpose |
+|---|---|
+| `POST /api/trips/{id}/book` | Book a trip (`{"fare_type": "standard"\|"flexi"\|"promo"}`) |
+| `GET /api/bookings` | All bookings |
+| `POST /api/support/chat` | Ask the assistant (NDJSON stream of `trace` events, then `result`) |
+| `POST /api/support/confirm/{quote_id}` · `POST /api/support/keep/{quote_id}` | Confirm or decline a cancellation |
+| `GET`/`DELETE /api/support/history` | Support conversation |
+| `GET /api/support/traces` | Dev board data |
+| `GET /api/support/index` · `POST /api/support/reindex` | Index stats / rebuild |
+
 ## Using the app
 
 1. **Destination.** Type a city and press **Search**, then pick the right match. Nothing is chosen automatically.
@@ -156,7 +214,8 @@ Streamlit ──POST /api/trips/{id}/chat──▶ FastAPI (streamed)
 ## Configuration (`.env`)
 
 See `.env.example`. The main settings are:
-- `GEMINI_API_KEY` and `GEMINI_MODEL` (default `gemini-2.5-flash`).
+- `LLM_PROVIDER` (`groq` or `gemini`), with `GROQ_API_KEY` / `GROQ_MODEL` (default `openai/gpt-oss-120b`) or `GEMINI_API_KEY` / `GEMINI_MODEL`, and `LLM_TIMEOUT_S`.
+- Support assistant: `HOME_COUNTRY` (domestic vs international), `RAG_DATA_DIR`, `CHROMA_DIR`, `EMBEDDING_MODEL`, `RAG_SCORE_THRESHOLD`, `RAG_TOP_K`.
 - `HTTP_USER_AGENT`: public OSM services need an identifying User-Agent with contact info.
 - Provider URLs and timeouts.
 - `SQLITE_PATH`.

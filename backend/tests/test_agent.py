@@ -126,3 +126,31 @@ def test_wrong_day_count_rejected():
     result, _ = run(TripAgent(llm, FakeOverpass(), FakeNominatim(), FakeRouter()), ctx(days=2))
     assert "exactly 2 day" in llm.seen[2][-1].content
     assert result.kind == "reply"
+
+
+def test_optional_tool_args_accept_null():
+    """Groq validates tool calls against the schema: optional fields must allow null."""
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    agent = TripAgent(ScriptedLLM([]), FakeOverpass(), FakeNominatim(), FakeRouter())
+    tools = {t.name: convert_to_openai_tool(t)["function"]["parameters"] for t in agent._tools(ctx(), True)}
+
+    def allows_null(prop: dict) -> bool:
+        return any(o.get("type") == "null" for o in prop.get("anyOf", []))
+
+    assert allows_null(tools["find_places"]["properties"]["must_see"])
+    assert allows_null(tools["ask_user"]["properties"]["quick_replies"])
+    plan = tools["submit_itinerary"]
+    assert allows_null(plan["properties"]["assumptions"])
+    stop = plan["$defs"]["AgentStop"]["properties"] if "$defs" in plan else None
+    if stop:
+        assert allows_null(stop["reason"])
+
+    llm = ScriptedLLM([
+        call("find_places", {"interests": ["culture"], "must_see": None, "near_place": None}),
+        call("submit_itinerary", {"days": [{"day_number": 1, "summary": None, "stops": [
+            {"candidate_id": "node/1", "visit_minutes": 60, "reason": None, "earliest_start": None}]}],
+            "summary": "Done", "assumptions": None}, cid="c2"),
+    ])
+    result, _ = run(TripAgent(llm, FakeOverpass(), FakeNominatim(), FakeRouter()), ctx())
+    assert result.kind == "plan" and result.plan.assumptions == []

@@ -75,8 +75,9 @@ Rules:
 
 class FindPlacesArgs(BaseModel):
     interests: list[str] = Field(description="Kinds of places: " + ", ".join(i.value for i in Interest))
-    must_see: list[str] = Field(default_factory=list,
-                                description="Specific place names to look up, up to ~100 km away (optional)")
+    # Optional fields accept null: Groq validates tool calls against the schema and rejects null for a plain list.
+    must_see: Optional[list[str]] = Field(default=None,
+                                          description="Specific place names to look up, up to ~100 km away (optional)")
     near_place: Optional[str] = Field(
         default=None, description="Optional town/area to search around instead of the city centre, "
                                   "for a day trip (e.g. 'Mahabalipuram'). Must be within ~100 km.")
@@ -88,7 +89,7 @@ class CheckRouteArgs(BaseModel):
 
 class AskUserArgs(BaseModel):
     question: str = Field(description="One short question for the traveller")
-    quick_replies: list[str] = Field(default_factory=list, description="2-4 short suggested answers")
+    quick_replies: Optional[list[str]] = Field(default=None, description="2-4 short suggested answers")
 
 
 # ------------------------------------------------------------------ results
@@ -155,6 +156,23 @@ def check_plan(plan: ItineraryPlan, known_ids: set[str], day_count: int) -> list
 def _redact(text: str) -> str:
     """Strip anything that looks like an API key before logging."""
     return re.sub(r"(key=|AIza|AQ\.)[\w.\-]+", r"\1<redacted>", text)
+
+
+def provider_name(llm) -> str:
+    """'Groq' or 'Gemini', from the LangChain chat model class."""
+    return "Groq" if "Groq" in type(llm).__name__ else "Gemini"
+
+
+def llm_error(e: Exception, provider: str = "Gemini") -> AppError:
+    """A safe user-facing error for a failed LLM call (never leaks provider details or keys)."""
+    detail = _redact(str(e))
+    log.warning("LLM call failed: %s: %s", type(e).__name__, detail[:300])
+    busy = any(s in detail for s in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "high demand",
+                                     "rate_limit", "over capacity"))
+    return AppError("agent_busy" if busy else "agent_unavailable",
+                    f"{provider} is overloaded or rate-limited right now. Please try again in a minute."
+                    if busy else "The AI agent is unavailable right now. Please retry.",
+                    retryable=True, provider=provider, http_status=503)
 
 
 def _text(ai: AIMessage) -> str:
@@ -276,13 +294,7 @@ class TripAgent:
             try:
                 ai: AIMessage = llm.invoke(messages)
             except Exception as e:  # never leak provider details or keys to the user
-                detail = _redact(str(e))
-                log.warning("LLM call failed: %s: %s", type(e).__name__, detail[:300])
-                busy = any(s in detail for s in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "high demand"))
-                raise AppError("agent_busy" if busy else "agent_unavailable",
-                               "Gemini is overloaded right now (high demand). Please try again in a minute."
-                               if busy else "The AI agent is unavailable right now. Please retry.",
-                               retryable=True, provider="Gemini", http_status=503)
+                raise llm_error(e, provider_name(self.llm))
             messages.append(ai)
 
             if not ai.tool_calls:
@@ -292,7 +304,7 @@ class TripAgent:
                 name, args = call["name"], call["args"]
                 if name == "ask_user":
                     q = AskUserArgs.model_validate(args)
-                    return AgentResult(kind="question", message=q.question, quick_replies=q.quick_replies[:4])
+                    return AgentResult(kind="question", message=q.question, quick_replies=(q.quick_replies or [])[:4])
 
                 if name == "submit_itinerary":
                     try:
@@ -322,11 +334,17 @@ class TripAgent:
                 messages.append(ToolMessage(content=str(output), tool_call_id=call["id"]))
 
         raise AppError("agent_gave_up", "The AI agent couldn't finish the plan.", retryable=True,
-                       provider="Gemini", http_status=502)
+                       provider=provider_name(self.llm), http_status=502)
 
 
-def build_llm(api_key: str, model: str, timeout_s: float):
+def build_llm(provider: str, api_key: str, model: str, timeout_s: float, temperature: float = 0.3):
+    """A LangChain chat model with tool calling, for LLM_PROVIDER 'gemini' or 'groq'."""
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(model=model, api_key=api_key, temperature=temperature, timeout=timeout_s, max_retries=3)
+
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    return ChatGoogleGenerativeAI(model=model, google_api_key=api_key, temperature=0.3,
-                                  timeout=timeout_s, max_retries=5)  
+    return ChatGoogleGenerativeAI(model=model, google_api_key=api_key, temperature=temperature,
+                                  timeout=timeout_s, max_retries=5)

@@ -119,6 +119,27 @@ def _save(trip_id):
         ss.flash_error = f"Not saved: {e.message}"
 
 
+FARES = {
+    "standard": "Standard: cancellation charges depend on how close to departure you cancel.",
+    "flexi": "Flexi: no cancellation charge 30+ days before departure (non-refundable items still apply).",
+    "promo": "Promo: non-refundable and cannot be amended once booked.",
+}
+
+
+def _book(trip_id):
+    ss = st.session_state
+    try:
+        ss.trip = api.book_trip(trip_id, ss.get("fare_pick") or "standard")
+        ss.flash = f"Booked · {ss.trip['booking']['booking_ref']}"
+    except ApiError as e:
+        ss.flash_error = f"Not booked: {e.message}"
+
+
+def _ask_support(trip_id):
+    ss = st.session_state
+    ss.goto = "support"
+
+
 # ------------------------------------------------------------------ header
 
 def _header(trip: dict) -> None:
@@ -128,6 +149,13 @@ def _header(trip: dict) -> None:
     planner = trip["constraints"].get("planner", "gemini")
     pbadge = ('<span class="badge badge-ai">AI agent</span>' if planner == "gemini"
               else '<span class="badge badge-ai">Built-in planner</span>')
+    booking = trip.get("booking")
+    booked = bool(booking) and booking["status"] == "booked"
+    if booked:
+        pbadge += (f'<span class="badge badge-booked">BOOKED · {esc(booking["booking_ref"])} · '
+                   f'{esc(booking["trip_type"]).upper()} · {esc(booking["fare_type"]).upper()}</span>')
+    elif booking:
+        pbadge += f'<span class="badge badge-cancelled">CANCELLED · {esc(booking["cancellation_ref"])}</span>'
     n_days = len(trip["days"])
     dates = fmt_date(trip["start_date"]) + ("" if n_days == 1 else f" – {fmt_date(trip['end_date'])}")
     c1, c2 = st.columns([2.1, 1.3], vertical_alignment="bottom")
@@ -142,6 +170,17 @@ def _header(trip: dict) -> None:
             with st.popover("Save trip", icon=":material/bookmark_add:", type="primary"):
                 st.text_input("Trip name", value=trip["title"], key="save_title", max_chars=120)
                 st.button("Save", type="primary", on_click=_save, args=(trip["id"],), width="stretch")
+        if booked:
+            st.button("Ask support", icon=":material/support_agent:", on_click=_ask_support, args=(trip["id"],),
+                      help="Questions, policies or cancelling this booking")
+        else:
+            with st.popover("Book this trip", icon=":material/confirmation_number:", type="primary" if saved else "secondary"):
+                st.segmented_control("Fare type", list(FARES), default="standard", key="fare_pick",
+                                     format_func=str.capitalize)
+                st.caption(FARES.get(ss.get("fare_pick") or "standard"))
+                st.caption("Prices and payments are handled by Customer Care. The fare type can't be changed "
+                           "after booking.")
+                st.button("Book now", type="primary", on_click=_book, args=(trip["id"],), width="stretch")
         with st.popover("Export", icon=":material/download:"):
             slug = quote(trip["title"].replace(" ", "-").lower())
             st.download_button("Calendar (.ics)", to_ics(trip), f"{slug}.ics", "text/calendar", icon=":material/calendar_month:",
@@ -154,6 +193,9 @@ def _header(trip: dict) -> None:
 
     note = ("Changes save automatically." if saved
             else "This is an unsaved draft — save it to keep it in My trips.")
+    if booked:
+        note += (" This trip is booked: editing stops is free, but date or traveller changes are amendments "
+                 "handled by Customer Care.")
     st.markdown(
         f"<div class='disclaimer'>ⓘ Draft itinerary built from OpenStreetMap data. Opening hours, access and "
         f"conditions are not verified — please check before you go. {note}</div>", unsafe_allow_html=True)

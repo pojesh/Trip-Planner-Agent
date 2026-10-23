@@ -117,3 +117,42 @@ def add_stop(trip_id: str, day_id: str, candidate_id: str) -> dict:
 
 def recalculate(trip_id: str, day_id: str) -> dict:
     return _request("POST", f"/api/trips/{trip_id}/days/{day_id}/recalculate")
+
+
+# ------------------------------------------------------------------ bookings + support assistant
+
+def book_trip(trip_id: str, fare_type: str) -> dict:
+    return _request("POST", f"/api/trips/{trip_id}/book", json={"fare_type": fare_type})
+
+
+def support_chat(message: str, trip_id: Optional[str] = None) -> Iterator[dict]:
+    return _stream("/api/support/chat", {"message": message, "trip_id": trip_id})
+
+
+def support_confirm(quote_id: str) -> dict:
+    return _request("POST", f"/api/support/confirm/{quote_id}")
+
+
+def support_keep(quote_id: str) -> dict:
+    return _request("POST", f"/api/support/keep/{quote_id}")
+
+
+def support_history() -> list[dict]:
+    return _request("GET", "/api/support/history")
+
+
+def support_clear() -> None:
+    _request("DELETE", "/api/support/history")
+
+
+def support_traces(limit: int = 20) -> list[dict]:
+    return _request("GET", "/api/support/traces", params={"limit": limit})
+
+
+def support_index() -> dict:
+    # The first call may load the embedding model and build the index.
+    return _request("GET", "/api/support/index", timeout=_STREAM_TIMEOUT)
+
+
+def support_reindex() -> dict:
+    return _request("POST", "/api/support/reindex", timeout=_STREAM_TIMEOUT)

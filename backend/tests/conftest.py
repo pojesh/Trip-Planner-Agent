@@ -87,6 +87,13 @@ def repo(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_support_warm_up(monkeypatch):
+    """The app's startup would load the real embedding model; tests stay offline."""
+    import backend.main as main
+    monkeypatch.setattr(main, "_warm_up_support", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
     import backend.clients.http as http
     import backend.clients.nominatim as nom

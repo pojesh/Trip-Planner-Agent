@@ -7,12 +7,12 @@ inside one transaction, so a failed write never leaves a half-saved plan.
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from backend.domain.models import (
-    ChatMessage, Day, Issue, Leg, Location, Poi, Stop, Trip, TripConstraints, TripStatus, TripSummary,
+    Booking, ChatMessage, Day, Issue, Leg, Location, Poi, Stop, Trip, TripConstraints, TripStatus, TripSummary,
 )
 from backend.errors import AppError
 
@@ -93,6 +93,51 @@ CREATE TABLE IF NOT EXISTS route_legs (
   fetched_at TEXT,
   error_code TEXT,
   UNIQUE(itinerary_day_id, sequence)
+);
+
+CREATE TABLE IF NOT EXISTS bookings (
+  trip_id TEXT PRIMARY KEY REFERENCES trips(id) ON DELETE CASCADE,
+  booking_ref TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK(status IN ('booked','cancelled')),
+  trip_type TEXT NOT NULL CHECK(trip_type IN ('domestic','international')),
+  fare_type TEXT NOT NULL CHECK(fare_type IN ('standard','flexi','promo')),
+  policy_version TEXT NOT NULL,
+  booked_at TEXT NOT NULL,
+  cancelled_at TEXT,
+  cancellation_ref TEXT UNIQUE,
+  cancellation_reason TEXT,
+  charge_percent INTEGER,
+  refund_percent INTEGER,
+  refund_status TEXT,
+  refund_expected_by TEXT
+);
+
+-- A cancellation quote waiting for the user's confirmation.
+CREATE TABLE IF NOT EXISTS pending_actions (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  trip_id TEXT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS support_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  at TEXT NOT NULL
+);
+
+-- One row per support-assistant turn, shown on the Dev Board.
+CREATE TABLE IF NOT EXISTS assistant_traces (
+  id TEXT PRIMARY KEY,
+  at TEXT NOT NULL,
+  user_message TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  events_json TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_days_trip ON itinerary_days(trip_id);
@@ -209,11 +254,15 @@ class SqliteRepo:
 
     # ------------------------------------------------------------ reads
 
-    def list_trips(self, status: TripStatus = TripStatus.saved) -> list[TripSummary]:
+    def list_trips(self, status: Optional[TripStatus] = TripStatus.saved) -> list[TripSummary]:
+        """Trips with the given status (None = every trip), newest first, with booking info."""
+        where, args = ("WHERE t.status = ?", (status.value,)) if status else ("", ())
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                """SELECT id, title, status, destination_label, start_date, end_date, updated_at
-                   FROM trips WHERE status = ? ORDER BY updated_at DESC""", (status.value,)).fetchall()
+                f"""SELECT t.id, t.title, t.status, t.destination_label, t.start_date, t.end_date,
+                      t.updated_at, b.booking_ref, b.status AS booking_status
+                    FROM trips t LEFT JOIN bookings b ON b.trip_id = t.id
+                    {where} ORDER BY t.updated_at DESC""", args).fetchall()
         return [TripSummary(**dict(r)) for r in rows]
 
     def get_trip(self, trip_id: str) -> Optional[Trip]:
@@ -236,6 +285,7 @@ class SqliteRepo:
                     stops=[_row_to_stop(s) for s in stops],
                     legs=[_row_to_leg(g) for g in legs],
                 ))
+            b = conn.execute("SELECT * FROM bookings WHERE trip_id = ?", (trip_id,)).fetchone()
         return Trip(
             id=t["id"], title=t["title"], status=t["status"],
             destination=Location(label=t["destination_label"], lat=t["destination_lat"], lon=t["destination_lon"]),
@@ -248,8 +298,103 @@ class SqliteRepo:
             agent_summary=t["agent_summary"],
             candidates=[Poi(**p) for p in json.loads(t["candidates_json"])],
             chat=[ChatMessage(**m) for m in json.loads(t["chat_json"])],
+            booking=Booking(**dict(b)) if b else None,
             days=days, created_at=t["created_at"], updated_at=t["updated_at"],
         )
+
+    # ------------------------------------------------------------ bookings
+
+    def save_booking(self, b: Booking) -> None:
+        cols = list(Booking.model_fields)
+        values = [v.value if hasattr(v, "value") else (v.isoformat() if isinstance(v, date) else v)
+                  for v in (getattr(b, c) for c in cols)]
+        try:
+            with closing(self._connect()) as conn, conn:
+                conn.execute(f"INSERT OR REPLACE INTO bookings ({', '.join(cols)}) "
+                             f"VALUES ({', '.join('?' * len(cols))})", values)
+        except sqlite3.Error:
+            raise AppError("storage_error", "Could not save the booking. Please retry.",
+                           retryable=True, http_status=500)
+
+    def get_booking(self, trip_id: str) -> Optional[Booking]:
+        with closing(self._connect()) as conn:
+            r = conn.execute("SELECT * FROM bookings WHERE trip_id = ?", (trip_id,)).fetchone()
+        return Booking(**dict(r)) if r else None
+
+    def get_booking_by_ref(self, booking_ref: str) -> Optional[Booking]:
+        with closing(self._connect()) as conn:
+            r = conn.execute("SELECT * FROM bookings WHERE booking_ref = ? COLLATE NOCASE",
+                             (booking_ref.strip(),)).fetchone()
+        return Booking(**dict(r)) if r else None
+
+    def list_bookings(self) -> list[Booking]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT * FROM bookings ORDER BY booked_at DESC").fetchall()
+        return [Booking(**dict(r)) for r in rows]
+
+    def cancel_booking(self, b: Booking, action_id: str) -> bool:
+        """Mark a booked trip cancelled and use up its confirmation, in one transaction.
+
+        Returns False (and changes nothing) if the booking was no longer 'booked'.
+        """
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                """UPDATE bookings SET status = 'cancelled', cancelled_at = ?, cancellation_ref = ?,
+                     cancellation_reason = ?, charge_percent = ?, refund_percent = ?, refund_status = ?,
+                     refund_expected_by = ?
+                   WHERE trip_id = ? AND status = 'booked'""",
+                (b.cancelled_at, b.cancellation_ref, b.cancellation_reason, b.charge_percent,
+                 b.refund_percent, b.refund_status,
+                 b.refund_expected_by.isoformat() if b.refund_expected_by else None, b.trip_id))
+            if cur.rowcount:
+                conn.execute("UPDATE pending_actions SET used_at = ? WHERE id = ?", (b.cancelled_at, action_id))
+            return cur.rowcount > 0
+
+    # ------------------------------------------------------------ pending confirmations
+
+    def save_pending(self, action_id: str, kind: str, trip_id: str, payload: dict,
+                     created_at: str, expires_at: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO pending_actions (id, kind, trip_id, payload_json, created_at, expires_at) "
+                         "VALUES (?,?,?,?,?,?)",
+                         (action_id, kind, trip_id, json.dumps(payload), created_at, expires_at))
+
+    def get_pending(self, action_id: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            r = conn.execute("SELECT * FROM pending_actions WHERE id = ?", (action_id,)).fetchone()
+        if r is None:
+            return None
+        return {**dict(r), "payload": json.loads(r["payload_json"])}
+
+    # ------------------------------------------------------------ support chat + traces
+
+    def add_support_message(self, role: str, content: str, meta: Optional[dict] = None) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO support_messages (role, content, meta_json, at) VALUES (?,?,?,?)",
+                         (role, content, json.dumps(meta or {}), datetime.now(timezone.utc).isoformat(timespec="seconds")))
+
+    def list_support_messages(self, limit: int = 100) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT * FROM support_messages ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [{"role": r["role"], "content": r["content"], "meta": json.loads(r["meta_json"]), "at": r["at"]}
+                for r in reversed(rows)]
+
+    def clear_support_messages(self) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM support_messages")
+
+    def save_trace(self, trace_id: str, at: str, user_message: str, summary: dict, events: list[dict]) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO assistant_traces (id, at, user_message, summary_json, events_json) "
+                         "VALUES (?,?,?,?,?)",
+                         (trace_id, at, user_message, json.dumps(summary), json.dumps(events)))
+
+    def list_traces(self, limit: int = 20) -> list[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT * FROM assistant_traces ORDER BY at DESC LIMIT ?", (limit,)).fetchall()
+        return [{"id": r["id"], "at": r["at"], "user_message": r["user_message"],
+                 "summary": json.loads(r["summary_json"]), "events": json.loads(r["events_json"])}
+                for r in rows]
 
 
 def _row_to_stop(r: sqlite3.Row) -> Stop:

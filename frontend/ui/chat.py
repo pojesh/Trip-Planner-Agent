@@ -47,7 +47,8 @@ def _send(trip: dict, text: str, box) -> None:
 
 def render_chat(trip: dict, agent_on: bool) -> None:
     if not agent_on:
-        st.info("The AI assistant needs a Gemini API key. Add `GEMINI_API_KEY=...` to `.env` and restart "
+        st.info("The AI assistant needs an LLM API key. Set `LLM_PROVIDER` and `GROQ_API_KEY` or "
+                "`GEMINI_API_KEY` in `.env` and restart "
                 "the backend. You can still edit the plan by hand in the Itinerary tab.")
         return
 

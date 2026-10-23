@@ -97,6 +97,8 @@ h1, h2, h3, h4 { letter-spacing: -0.02em; }
 .badge-draft { background:#FEF3C7; color:#92400E; }
 .badge-saved { background:#DCFCE7; color:#166534; }
 .badge-ai { background:#EEF0FF; color:#4338CA; }
+.badge-booked { background:#DBEAFE; color:#1E40AF; }
+.badge-cancelled { background:#F3F4F6; color:#4B5563; }
 .disclaimer { font-size:.8rem; color:#6B7085; background:#F8F9FC; border:1px dashed #D9DCE8;
   border-radius:12px; padding:.45rem .75rem; margin:.5rem 0 .2rem; }
 
